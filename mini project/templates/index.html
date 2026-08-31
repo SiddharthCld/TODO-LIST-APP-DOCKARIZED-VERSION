@@ -856,15 +856,34 @@
         </div>
     </div>
 
-    <script>
+    <script type="module">
+        import {
+            subscribeTasks,
+            addTaskToFirebase,
+            toggleTaskStatusInFirebase,
+            deleteTaskFromFirebase,
+            addSubtaskToFirebase,
+            toggleSubtaskInFirebase,
+            deleteSubtaskFromFirebase,
+            acknowledgeReminderInFirebase
+        } from "/static/js/firebase.server.js";
+
         let tasksState = [];
+        let defaultSections = ["General", "In Progress", "Backlog"];
         let sectionsState = ["General", "In Progress", "Backlog"];
         let currentFilter = 'all';
         let notificationsEnabled = false;
 
         document.addEventListener('DOMContentLoaded', () => {
-            fetchSections();
-            fetchTasks();
+            // Subscribe to real-time Firebase Firestore updates
+            subscribeTasks((tasks) => {
+                tasksState = tasks;
+                updateSectionsState();
+                renderTasks();
+                updateStats();
+                checkPendingReminders();
+            });
+
             initNotificationsState();
             initGeolocationWatch();
 
@@ -886,33 +905,25 @@
                 }
 
                 try {
-                    const response = await fetch('/tasks', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            title: parsed.cleanTitle || rawInput,
-                            assigned_to: parsed.assignee,
-                            section: parsed.section,
-                            due_date_text: parsed.dueDateText || (dueISO ? new Date(dueISO).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''),
-                            due_timestamp: dueISO,
-                            reminder_offset: parseInt(offsetVal) || 15,
-                            location_alert: parsed.locationAlert,
-                            recurring: parsed.recurring,
-                            labels: parsed.labels
-                        })
+                    await addTaskToFirebase({
+                        title: parsed.cleanTitle || rawInput,
+                        assigned_to: parsed.assignee,
+                        section: parsed.section || "General",
+                        due_date_text: parsed.dueDateText || (dueISO ? new Date(dueISO).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''),
+                        due_timestamp: dueISO,
+                        reminder_offset: parseInt(offsetVal) || 15,
+                        location_alert: parsed.locationAlert,
+                        recurring: parsed.recurring,
+                        labels: parsed.labels,
+                        subtasks: []
                     });
 
-                    if (response.ok) {
-                        titleInput.value = '';
-                        document.getElementById('task-due-picker').value = '';
-                        document.getElementById('nlp-preview').innerHTML = '';
-                        await fetchTasks();
-                    } else {
-                        const err = await response.json();
-                        alert(err.error || 'Failed to add task');
-                    }
+                    titleInput.value = '';
+                    document.getElementById('task-due-picker').value = '';
+                    document.getElementById('nlp-preview').innerHTML = '';
                 } catch (err) {
-                    console.error('Error adding task:', err);
+                    console.error('Error adding task to Firebase:', err);
+                    alert('Failed to save task to Firebase database.');
                 }
             });
 
@@ -941,6 +952,69 @@
             // Background Reminder Checker (runs every 10 seconds)
             setInterval(checkPendingReminders, 10000);
         });
+
+        // --- Global Handlers Exposed for HTML onclick Attributes ---
+        window.requestNotificationPermission = requestNotificationPermission;
+        window.setFilter = setFilter;
+        window.renderTasks = renderTasks;
+
+        window.toggleTaskStatus = async function(id) {
+            try {
+                const task = tasksState.find(t => String(t.id) === String(id));
+                if (task) {
+                    await toggleTaskStatusInFirebase(id, task.status);
+                }
+            } catch (err) {
+                console.error('Error toggling task in Firebase:', err);
+            }
+        };
+
+        window.deleteTask = async function(id) {
+            try {
+                await deleteTaskFromFirebase(id);
+            } catch (err) {
+                console.error('Error deleting task from Firebase:', err);
+            }
+        };
+
+        window.addSubtask = async function(taskId, event) {
+            event.preventDefault();
+            const input = document.getElementById(`subtask-input-${taskId}`);
+            const title = input.value.trim();
+            if (!title) return;
+
+            try {
+                const task = tasksState.find(t => String(t.id) === String(taskId));
+                if (task) {
+                    await addSubtaskToFirebase(taskId, task.subtasks, title);
+                    input.value = '';
+                }
+            } catch (err) {
+                console.error('Error adding subtask in Firebase:', err);
+            }
+        };
+
+        window.toggleSubtask = async function(taskId, subtaskId) {
+            try {
+                const task = tasksState.find(t => String(t.id) === String(taskId));
+                if (task) {
+                    await toggleSubtaskInFirebase(taskId, task.subtasks, subtaskId);
+                }
+            } catch (err) {
+                console.error('Error toggling subtask in Firebase:', err);
+            }
+        };
+
+        window.deleteSubtask = async function(taskId, subtaskId) {
+            try {
+                const task = tasksState.find(t => String(t.id) === String(taskId));
+                if (task) {
+                    await deleteSubtaskFromFirebase(taskId, task.subtasks, subtaskId);
+                }
+            } catch (err) {
+                console.error('Error deleting subtask in Firebase:', err);
+            }
+        };
 
         // --- Notification & Reminders Engine ---
         function initNotificationsState() {
@@ -978,8 +1052,8 @@
                 const osc = ctx.createOscillator();
                 const gain = ctx.createGain();
                 osc.type = 'sine';
-                osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-                osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15); // A5
+                osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.15);
                 gain.gain.setValueAtTime(0.1, ctx.currentTime);
                 gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
                 osc.connect(gain);
@@ -1004,7 +1078,6 @@
                 const reminderTime = dueTime - offsetMs;
 
                 if (now >= reminderTime) {
-                    // Trigger push notification & audio alert
                     playChimeSound();
                     if (notificationsEnabled) {
                         new Notification(`⏰ Reminder: ${task.title}`, {
@@ -1012,12 +1085,11 @@
                         });
                     }
 
-                    // Acknowledge reminder on backend so it's not repeatedly fired
                     try {
-                        await fetch(`/tasks/${task.id}/reminders/acknowledge`, { method: 'POST' });
+                        await acknowledgeReminderInFirebase(task.id);
                         task.reminder_sent = true;
                     } catch (e) {
-                        console.error('Failed to acknowledge reminder:', e);
+                        console.error('Failed to acknowledge reminder in Firebase:', e);
                     }
                 }
             }
@@ -1027,10 +1099,8 @@
         function initGeolocationWatch() {
             if ("geolocation" in navigator) {
                 navigator.geolocation.watchPosition((pos) => {
-                    // Check tasks tagged with location_alert
                     tasksState.forEach(task => {
                         if (task.status === 'pending' && task.location_alert && !task._locAlerted) {
-                            // Proximity alert simulation / notification
                             if (notificationsEnabled) {
                                 new Notification(`📍 Nearby Task Alert: ${task.location_alert}`, {
                                     body: `You are near ${task.location_alert}: "${task.title}"`
@@ -1040,7 +1110,6 @@
                         }
                     });
                 }, (err) => {
-                    // Geolocation permission or tracking unavailable
                 }, { enableHighAccuracy: false, maximumAge: 60000 });
             }
         }
@@ -1056,35 +1125,30 @@
             let dueTimestampISO = '';
             let recurring = '';
 
-            // Extract @assignee
             const assigneeMatch = text.match(/@([a-zA-Z0-9_]+)/);
             if (assigneeMatch) {
                 assignee = assigneeMatch[1];
                 text = text.replace(assigneeMatch[0], '');
             }
 
-            // Extract /section
             const sectionMatch = text.match(/\/([a-zA-Z0-9_\s]+)/);
             if (sectionMatch) {
                 section = sectionMatch[1].trim();
                 text = text.replace(sectionMatch[0], '');
             }
 
-            // Extract Location alert (e.g. "at Office", "at Gym")
             const locMatch = text.match(/\bat\s+(Office|Gym|Home|Store|Work|Client)\b/i);
             if (locMatch) {
                 locationAlert = locMatch[1];
                 text = text.replace(locMatch[0], '');
             }
 
-            // Extract #labels
             const labelMatches = text.matchAll(/#([a-zA-Z0-9_]+)/g);
             for (const match of labelMatches) {
                 labels.push(match[1]);
                 text = text.replace(match[0], '');
             }
 
-            // Extract Recurrence & Dates (e.g. "due tomorrow at 5pm", "every Tuesday at 6pm", "tomorrow")
             const recurringRegex = /\b(every\s+(day|week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)(\s+at\s+\d+(:\d+)?\s*(am|pm)?)?|daily|weekly|monthly)\b/i;
             const recurringMatch = text.match(recurringRegex);
             if (recurringMatch) {
@@ -1140,103 +1204,19 @@
             });
         }
 
-        // --- Data Fetching ---
-        async function fetchSections() {
-            try {
-                const res = await fetch('/sections');
-                if (res.ok) {
-                    sectionsState = await res.json();
-                    updateSectionSelect();
-                }
-            } catch (err) {
-                console.error('Error fetching sections:', err);
-            }
-        }
-
-        async function fetchTasks() {
-            try {
-                const res = await fetch('/tasks');
-                if (res.ok) {
-                    tasksState = await res.json();
-                    renderTasks();
-                    updateStats();
-                    checkPendingReminders();
-                }
-            } catch (err) {
-                console.error('Error fetching tasks:', err);
-            }
+        function updateSectionsState() {
+            const dynamicSecs = tasksState.map(t => t.section).filter(Boolean);
+            sectionsState = Array.from(new Set([...defaultSections, ...dynamicSecs]));
+            updateSectionSelect();
         }
 
         function updateSectionSelect() {
             const select = document.getElementById('section-filter');
+            const currentSelected = select.value;
             select.innerHTML = '<option value="all">All Sections</option>';
             sectionsState.forEach(sec => {
-                select.innerHTML += `<option value="${escapeHtml(sec)}">${escapeHtml(sec)}</option>`;
+                select.innerHTML += `<option value="${escapeHtml(sec)}" ${currentSelected === sec ? 'selected' : ''}>${escapeHtml(sec)}</option>`;
             });
-        }
-
-        // --- Actions ---
-        async function toggleTaskStatus(id) {
-            try {
-                const res = await fetch(`/tasks/${id}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                if (res.ok) await fetchTasks();
-            } catch (err) {
-                console.error('Error toggling task:', err);
-            }
-        }
-
-        async function deleteTask(id) {
-            try {
-                const res = await fetch(`/tasks/${id}`, { method: 'DELETE' });
-                if (res.ok) await fetchTasks();
-            } catch (err) {
-                console.error('Error deleting task:', err);
-            }
-        }
-
-        async function addSubtask(taskId, event) {
-            event.preventDefault();
-            const input = document.getElementById(`subtask-input-${taskId}`);
-            const title = input.value.trim();
-            if (!title) return;
-
-            try {
-                const res = await fetch(`/tasks/${taskId}/subtasks`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ title })
-                });
-                if (res.ok) {
-                    input.value = '';
-                    await fetchTasks();
-                }
-            } catch (err) {
-                console.error('Error adding subtask:', err);
-            }
-        }
-
-        async function toggleSubtask(taskId, subtaskId) {
-            try {
-                const res = await fetch(`/tasks/${taskId}/subtasks/${subtaskId}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                if (res.ok) await fetchTasks();
-            } catch (err) {
-                console.error('Error toggling subtask:', err);
-            }
-        }
-
-        async function deleteSubtask(taskId, subtaskId) {
-            try {
-                const res = await fetch(`/tasks/${taskId}/subtasks/${subtaskId}`, { method: 'DELETE' });
-                if (res.ok) await fetchTasks();
-            } catch (err) {
-                console.error('Error deleting subtask:', err);
-            }
         }
 
         function setFilter(filter, el) {
@@ -1272,7 +1252,7 @@
             });
 
             if (filteredTasks.length === 0) {
-                container.innerHTML = '<div class="empty-box">No tasks to display</div>';
+                container.innerHTML = '<div class="empty-box">No tasks in Firebase database</div>';
                 return;
             }
 
@@ -1354,14 +1334,14 @@
                         const subtaskItems = subtasks.map(s => `
                             <div class="subtask-item ${s.completed ? 'is-done' : ''}">
                                 <div class="subtask-left">
-                                    <button class="checkbox-btn" onclick="toggleSubtask(${task.id}, ${s.id})" aria-label="Toggle Subtask">
+                                    <button class="checkbox-btn" onclick="toggleSubtask('${task.id}', '${s.id}')" aria-label="Toggle Subtask">
                                         <svg class="check-icon" viewBox="0 0 12 10">
                                             <polyline points="1.5 6 4.5 9 10.5 1"></polyline>
                                         </svg>
                                     </button>
                                     <span class="subtask-title">${escapeHtml(s.title)}</span>
                                 </div>
-                                <button class="btn-icon-delete" onclick="deleteSubtask(${task.id}, ${s.id})" style="width: 24px; height: 24px;">
+                                <button class="btn-icon-delete" onclick="deleteSubtask('${task.id}', '${s.id}')" style="width: 24px; height: 24px;">
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
                                 </button>
                             </div>
@@ -1380,7 +1360,7 @@
                     item.innerHTML = `
                         <div class="task-main-row">
                             <div class="task-left">
-                                <button class="checkbox-btn" onclick="toggleTaskStatus(${task.id})" aria-label="Toggle Task Status">
+                                <button class="checkbox-btn" onclick="toggleTaskStatus('${task.id}')" aria-label="Toggle Task Status">
                                     <svg class="check-icon" viewBox="0 0 12 10">
                                         <polyline points="1.5 6 4.5 9 10.5 1"></polyline>
                                     </svg>
@@ -1397,7 +1377,7 @@
                             </div>
                             <div class="task-right">
                                 <span class="badge-status ${dueBadgeClass}">${dueTextDisplay}</span>
-                                <button class="btn-icon-delete" onclick="deleteTask(${task.id})" aria-label="Delete Task">
+                                <button class="btn-icon-delete" onclick="deleteTask('${task.id}')" aria-label="Delete Task">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                         <path d="M3 6h18"></path>
                                         <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
@@ -1407,7 +1387,7 @@
                             </div>
                         </div>
                         ${subtasksHTML}
-                        <form class="add-subtask-form" onsubmit="addSubtask(${task.id}, event)">
+                        <form class="add-subtask-form" onsubmit="addSubtask('${task.id}', event)">
                             <input type="text" id="subtask-input-${task.id}" class="input-subtask" placeholder="+ Add sub-task..." autocomplete="off">
                             <button type="submit" class="btn-subtask-add">Add</button>
                         </form>
@@ -1419,7 +1399,7 @@
 
         function escapeHtml(text) {
             const div = document.createElement('div');
-            div.textContent = text;
+            div.textContent = text || '';
             return div.innerHTML;
         }
     </script>
