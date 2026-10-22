@@ -8,20 +8,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 COPY . .
 
-# Stage 2: Lightweight runtime image
+# Stage 2: Runtime image
 FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# Copy installed Python packages
 COPY --from=builder /install /usr/local/
-
-# Copy application files
 COPY --from=builder /app /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
