@@ -28,6 +28,6 @@ COPY --from=builder /app /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-EXPOSE 8000
+EXPOSE 5000
 
 CMD ["python", "app.py"]
